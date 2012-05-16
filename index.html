@@ -1,0 +1,376 @@
+<!doctype html>
+<head>
+<title>JS-REPL</title>
+<link rel="stylesheet" href="codemirror/codemirror.css" />
+<link rel="stylesheet" href="codemirror/theme/monokai.css" />
+<style>
+  .prompt, .log {
+    display: block;
+    float:left;
+    margin: 0;
+    padding-right: 5px;
+  }
+  .codewrap {
+    display: inline-block;
+  }
+  .out .CodeMirror-lines {
+    white-space: pre-wrap;
+  }
+  .error {
+    color: #f33;
+  }
+  .in {
+    clear: both;
+  }
+  .CodeMirror-scroll {
+    height: auto;
+    overflow-y: hidden;
+    overflow-x: auto;
+  }
+  .loading {
+    position: fixed;
+    z-index: 10000;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: #222;
+    color: #eee;
+  }
+  .loading p {
+    position: fixed;
+    top:50%;
+    left:50%;
+    width: 600px;
+    height:100px;
+    line-height:100px;
+    padding:0;
+    font-size: 40px;
+    margin-top:-50px;
+    margin-left: -300px;
+    font-family: monospace;
+  }
+  /* how to get this programatically */
+  ::selection { background: #999; }
+  ::-moz-selection { background: #999; }
+</style>
+</head>
+<body>
+  <div id="repl">
+    <div class="out"></div>
+    <div class="in">
+      <div class="ps1 prompt CodeMirror CodeMirror-lines"></div>
+      <div class="input"><textarea class="cm-input"></textarea></div></div>
+  </div>
+  <div class="loading">
+    <p>JS-REPL loading...</p>
+  </div>
+  <script src="codemirror/codemirror-compressed.js"></script>
+  <script src="codemirror/runmode.js"></script>
+  <script src="jsdump/jsdump.js"></script>
+  <script>
+  (function(){
+  var JSREPL = {
+    "VERSION": "0.0.2",
+    "ps1": "JS-REPL $",
+    "sandbox": "sandbox.js",
+    "history": { "entries": [], "index": -1, "pending": "" },
+    "elements": { "repl": null, "console": null, "ps1": null, "in": null},
+    "editor": null,
+    "themes": {
+      "loaded": ["default", "monokai"],
+      "available": ["ambiance", "cobalt", "elegant", "monokai", "night", "xq-dark", "monokai",
+                    "blackboard", "eclipse", "lesser-dark", "neat", "rubyblue", "default" ],
+      "current": null
+    },
+    "Print": function(how, what){
+      var self = this;
+        switch(how){
+          case "console":
+            //type is argv[1] (e.g. log, warn, error...)
+            //what is array of args. we want to stack them in a single line. (float).
+            this.PrintConsole(arguments[1], what);
+            break;
+          case "result":
+            return this.PrintInspection(what);
+          case "error":
+            return this.PrintError(what);
+          case "code":
+          default:
+            return this.PrintCode(what, arguments[1]);
+        }
+    },
+    "PrintRaw": function(text, _class){
+      var wrap = document.createElement('div');
+      wrap.className = "CodeMirror";
+      _class = _class === void(0) ? "cm-keyword" : _class;
+      wrap.innerHTML =
+        '<div class="codewrap"><div class="CodeMirror-lines">'+
+        '<span class="'+_class+'">'+text+'</span>'
+        '</div></div>';
+      this.elements.console.appendChild(wrap);
+    },
+    "PrintConsole": function(type, args){
+      //similiar to inspect.
+      var wrap = document.createElement('div');
+      wrap.className = "CodeMirror";
+      wrap.innerHTML =
+        '<div class="codewrap"><div class="log CodeMirror-lines">'+
+        '<span class="cm-variable">Console</span>.<span class="cm-property">'+type+'</span>'
+        '</div></div>';
+      this.elements.console.appendChild(wrap);
+      var chain = wrap.querySelector(".codewrap");
+      args.forEach(function(v,i,a){
+        var code = jsDump.parse(v);
+        var div = document.createElement('div');
+        div.className = "log CodeMirror-lines";
+        CodeMirror.runMode(code, "text/javascript", div);
+        chain.appendChild(div);
+      });
+    },
+    "PrintError": function(err){
+      var wrap = document.createElement('div');
+      wrap.className = "CodeMirror";
+      wrap.innerHTML =
+        '<div class="codewrap"><div class="CodeMirror-lines">'+
+        '<span class="error">ERROR: '+err+'</span>'
+        '</div></div>';
+      this.elements.console.appendChild(wrap);
+    },
+    "PrintInspection": function(obj){
+      var code = jsDump.parse(obj);
+      return this.PrintCode(code);
+    },
+    "PrintCode": function(code, prompt){
+      var prmpt, wrap, console;
+      if(prompt !== void(0)){
+        //with prompt.
+        console = document.createElement('div');
+        this.elements.console.appendChild(console);
+        prmpt = document.createElement('div');
+        prmpt.innerHTML = this.elements.ps1.outerHTML;
+        console.appendChild(prmpt);
+      }else{
+        console = this.elements.console;
+      }
+      wrap = document.createElement('div')
+      ;
+      wrap.className = "CodeMirror";
+      wrap.innerHTML = '<div class="codewrap"><div class="CodeMirror-lines"></div></div>';
+      CodeMirror.runMode(code, "text/javascript", wrap.querySelector('.CodeMirror-lines'));
+      console.appendChild(wrap);
+    },
+    "Read": function(){
+      //get input. update history, push command onto console
+      var input = this.editor.getValue().trim();
+      if(input === ""){ return false; }
+      this.Print("code", input, true);
+      return input;
+    },
+    "Evaluate": function(code, cb){
+      var res, error, ok = false, tmp;
+      //we have some custom methods!
+      if(code.charAt(0) === ":" && this.commands[code.split(" ")[0].substring(1)] !== void(0)){
+        tmp = code.split(" ");
+        fn = tmp.shift().substring(1);
+        this.commands[fn].apply(this, tmp);
+        return cb({"ok": false,"console":[],"error":error,"result":res}); //supress Print
+      }
+      try{
+        if(!!~["{","["].indexOf(code.charAt(0)) && !!~["}","]"].indexOf(code.charAt(code.length-1))){
+          code = "("+code+")"; //allows object literals.
+        }
+        console.log(code);
+        res = window.eval(code);
+        ok = true
+      }catch(e){
+        //log error;
+        error = e;
+      }
+      return cb({ "ok": ok, "result": res, "error": error, "console": [] });
+    },
+    "Loop": function(){
+      this.elements.in.style.display = 'none';
+      var input = this.Read();
+      if(input === false){
+        this.elements.in.style.display = 'block';
+        return;
+      }
+      var self = this;
+      this.Evaluate(input, function(eval){
+        if(eval.console.length > 0){
+          eval.console.forEach(function(v,i,a){
+            self.Print('console', v, i);
+          });
+        }
+        if(eval.ok === false && eval.error !== void(0)){
+          self.Print('error', eval.error);
+        }else if(eval.ok === true){
+          self.Print('result', eval.result);
+        }
+        //now return to the loop!
+        self.elements.in.style.display = 'block';
+        self.editor.setValue("");
+        self.editor.focus();
+      });
+    },
+    "setTheme": function(name){
+      document.body.className = "cm-s-"+name;
+      this.themes.current = name;
+      this.store.set('cm-theme', name);
+    },
+    "loadTheme": function(name, cb){
+      var link = document.createElement('link');
+      link.rel = "stylesheet";
+      link.href = "codemirror/theme/"+name+".css";
+      var self = this;
+      link.onload = cb;
+      document.querySelector('head').appendChild(link);
+    },
+    "init": function(id){
+      var self = this;
+      var defaultTheme = this.store.get('cm-theme');
+      if(!defaultTheme){
+        defaultTheme = "monokai";
+      }
+      if(!!~this.themes.available.indexOf(defaultTheme)){
+        if(!!~this.themes.loaded.indexOf(defaultTheme)){
+          this.setTheme(defaultTheme);
+        }else{
+          this.loadTheme(defaultTheme, function(){
+            self.setTheme(defaultTheme);
+          })
+        }
+      }
+      this.elements.repl = document.querySelector("#"+id);
+      this.elements.console = this.elements.repl.querySelector('.out');
+      this.elements.in = this.elements.repl.querySelector('.in');
+      //Add our enter keybinding.
+      CodeMirror.keyMap.repl = {
+        "Enter": function(){
+          self.Loop();
+        },
+        /*"Shift-Enter": function(){
+          CodeMirror.commands.newlineAndIndent();
+        },*/
+        "fallthrough": "default"
+      };
+
+      this.editor = CodeMirror.fromTextArea(this.elements.repl.querySelector(".input"), {
+        "mode": "javascript",
+        "keyMap": "repl"
+      });
+      //fix the default theme class
+      this.elements.repl.querySelector(".CodeMirror-scroll").className = "CodeMirror-scroll"; //removing cm-s-default
+      this.editor.focus();
+      this.elements.ps1 = this.elements.repl.querySelector('.ps1');
+      this.elements.ps1.innerHTML = '<pre><span class="prompt">'+this.ps1+'</span></pre>';
+      //bind listeners;
+      var focus = function(){ self.editor.focus(); };
+      window.addEventListener('focus', focus);
+      document.addEventListener('click', focus);
+      //initial text.
+      this.boot();
+      //get prompt.
+      return this;
+    },
+    "boot": function(){
+      this.PrintRaw("JS-REPL v"+this.VERSION+" (:help)");
+      document.querySelector('.loading').style.display = "none";
+      this.editor.focus();
+    },
+    "commands": {
+      "theme": function(name){
+        var self = this;
+        if(name === void(0) || !~this.themes.available.indexOf(name)){
+          //list
+          this.PrintCode("Current theme is \""+this.themes.current+"\"");
+          this.PrintCode("Available themes: \""+this.themes.available.join('", "')+'"');
+        }else{
+          if(!~this.themes.loaded.indexOf(name)){
+            this.loadTheme(name, function(){
+              self.setTheme(name);
+              self.PrintRaw("-- Switching to theme: "+name);
+            })
+          }else{
+            this.setTheme(name);
+            this.PrintRaw("-- Switching to theme: "+name);
+          }
+        }
+      },
+      "demo": function(){
+        var steps = [
+          function(){ this.PrintRaw("-- We can assign variables."); },
+          function(){ this.editor.setValue("var a = 10, b = 20, add = function(x,y){ return x + y; };"); },
+          function(){ this.Loop();  },
+          function(){ this.PrintRaw("-- Assignment returns 'undefined'"); },
+          function(){ this.PrintRaw("-- Now we can use those variables. e.g. adding a and b should give us 30."); },
+          function(){ this.editor.setValue("add(a, b);"); },
+          function(){ this.Loop();  },
+          function(){ this.PrintRaw("-- W00t! It worked! Now it's your turn ;)"); }
+        ];
+        var self = this;
+        var next = function next(){
+          fn = steps.shift();
+          fn.call(self);
+          if(steps.length > 0){
+            setTimeout(next, 800);
+          }
+        };
+        next();
+      },
+      "info": function(){
+        var obj = {
+          "title": "JS-REPL",
+          "version": this.VERSION,
+          "link": "https://github.com/thechriswalker/js-repl",
+          "build_by": {"name": "Chris Walker", "github":"https://github.com/thechriswalker"},
+          "thanks": [
+            {"to": "CodeMirror", "for": "awesome code editor", "link": "http://codemirror.net"},
+            {"to": "jsDump", "for": "fancy object introspection", "link": "http://nv.github.com/jsDump"}
+          //,{"to": "JSandbox", "for": "inspiration re. sandboxing the eval", "link": "https://github.com/eligrey/jsandbox"}
+          ],
+          "todo": ["Sandboxing the Javascript Eval"],
+        };
+        this.PrintConsole("info", [obj]);
+      },
+      "help": function(){
+        this.PrintRaw([
+          "JS-REPL v"+this.VERSION+" Interactive JavaScript Console",
+          "",
+          "Simple type your code after the prompt. Hit 'Enter' to execute.",
+          "For multiline input, use 'Shift+Enter' to input a newline",
+          "",
+          "There are also some builtins (like this :help).",
+          "They are:",
+          "  :help            Show this help.",
+          "  :demo            A Quick demo performs some simple javascript for you.",
+          "  :info            About this console.",
+          "  :theme [name]    Switch theme to 'name'. If 'name' omitted list available themes.",
+          "  :clear           Clear the output.",
+        ].join("\n"));
+      },
+      "clear": function(){
+        this.elements.console.innerHTML = "";
+      },
+      "exit": function(){ window.location.href = "https://duckduckgo.com"; },
+      "quit": function(){ this.commands.exit(); }
+    },
+    "store":{
+      "get": function(key){
+        return window.localStorage.getItem(key);
+      },
+      "set":function(key, value){
+        if(value === void(0)){
+          //delete
+          return window.localStorage.removeItem(key);
+        }else{
+          return window.localStorage.setItem(key, value);
+        }
+      }
+    }
+
+  };
+  JSREPL.init("repl");})();</script>
+</body>
+</html>
